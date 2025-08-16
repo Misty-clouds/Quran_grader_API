@@ -1,37 +1,103 @@
 # main.py
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from pydantic import BaseModel, Field
 import uvicorn
 import io
 import re
-from typing import List, Dict
+import logging
+import os
+import time
+from typing import List, Dict, Optional
+from contextlib import asynccontextmanager
 
 # Import Whisper
 from faster_whisper import WhisperModel
 
-# --- Whisper Model Loading (Global or in a lifespan context for FastAPI) ---
-# Choose a model size: 'tiny', 'base', 'small', 'medium', 'large-v2', 'large-v3'
-# 'medium' or 'large-v2/v3' are good for Arabic accuracy but require more resources.
-# 'compute_type' can be 'int8', 'int8_float16', 'float16', 'float32'
-# 'cuda' is for NVIDIA GPUs, 'cpu' for CPU. If no GPU, use 'cpu'.
-# Ensure you have the appropriate PyTorch/CUDA drivers if using GPU.
-model_size = "medium"  # Or "medium" for less VRAM/RAM
-compute_type = "int8"  # Use "float16" if you have a modern GPU, "float32" or "int8" for CPU
-device = "cpu"  # Change to "cuda" if you have an NVIDIA GPU
 
-try:
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    print(f"Whisper model '{model_size}' loaded successfully on {device} with {compute_type} compute type.")
-except Exception as e:
-    print(f"Error loading Whisper model: {e}")
-    print("Please ensure you have sufficient RAM/VRAM for the chosen model size and the correct compute_type/device.")
-    # Exit or handle gracefully, perhaps fall back to a smaller model or CPU
-    raise
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Configuration
+class Config:
+    MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")  # Changed from medium to small for Render
+    COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+    DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+    MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "25")) * 1024 * 1024  # Reduced to 25MB for Render
+    PASS_THRESHOLD = float(os.getenv("PASS_THRESHOLD", "70.0"))
+    ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    PORT = int(os.getenv("PORT", "10000"))  # Render's default port
+
+config = Config()
+
+# Pydantic models for request/response
+class GradingResponse(BaseModel):
+    transcribed_text: str
+    grade: float = Field(..., ge=0, le=100)
+    is_passed: bool
+    reference_text: str
+    similarity_score: float = Field(..., ge=0, le=1)
+    processing_time_ms: int
+
+class ErrorResponse(BaseModel):
+    error: str
+    detail: str
+    timestamp: str
+
+# Global model variable
+model: Optional[WhisperModel] = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    global model
+    try:
+        logger.info(f"Loading Whisper model '{config.MODEL_SIZE}' on {config.DEVICE}")
+        model = WhisperModel(config.MODEL_SIZE, device=config.DEVICE, compute_type=config.COMPUTE_TYPE)
+        logger.info(f"Whisper model loaded successfully")
+    except Exception as e:
+        logger.error(f"Error loading Whisper model: {e}")
+        raise
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down application")
 
 app = FastAPI(
     title="Quran Recitation Grader API",
     description="API for transcribing Quranic recitations using Whisper and grading them.",
     version="1.0.0",
+    lifespan=lifespan,
+    responses={
+        500: {"model": ErrorResponse},
+        400: {"model": ErrorResponse},
+    }
+)
+
+# Add CORS middleware for Flutter apps
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+# Add trusted host middleware for security
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["*"] if "*" in config.ALLOWED_ORIGINS else config.ALLOWED_ORIGINS
 )
 
 
@@ -74,23 +140,26 @@ def get_arabic_letter_phonetics() -> Dict[str, List[str]]:
 def normalize_arabic_text(text: str) -> str:
     # Remove diacritics
     text = re.sub(r'[\u064B-\u0652]', '', text)
+    
+    # Remove tatweel (kashida)
+    text = re.sub(r'\u0640', '', text)
 
     # Normalize similar letters
     text = re.sub(r'[أإآا]', 'ا', text)
     text = re.sub(r'[يى]', 'ي', text)
-    text = re.sub(r'[ةت]', 'ت',
-                  text)  # Be careful with this for recitation - 'ة' (taa marbuta) vs 'ت' (taa) are distinct sounds
+    text = re.sub(r'[ةت]', 'ت', text)  # Be careful with this for recitation
+    
+    # Normalize special Unicode variants
+    text = re.sub(r'ٱ', 'ا', text)  # Arabic Letter Alef Wasla
+    text = re.sub(r'ﷲ', 'الله', text)  # Allah ligature
+    text = re.sub(r'ﷺ', '', text)  # Remove Islamic symbols
+    text = re.sub(r'ﷻ', '', text)  # Remove Islamic symbols
 
     # Remove non-Arabic characters except spaces
-    # Note: Arabic numbers (e.g., ٠-٩) are kept by default if they are within \u0600-\u06FF range
     text = re.sub(r'[^\u0600-\u06FF\s]', '', text)
-
-    # ArabicNumbers library is for Flutter/Dart. In Python, we can convert if needed,
-    # but Whisper usually handles numbers well if they are spoken.
-    # If `text` contains English digits, you might want to convert them to Arabic digits
-    # or just let them be, depending on expected input.
-    # For now, we assume spoken Arabic will produce Arabic script numbers or words.
-    # text = ''.join([arabic_digits.get(c, c) for c in text]) # Example for digit conversion
+    
+    # Clean up extra spaces
+    text = re.sub(r'\s+', ' ', text)
 
     return text.strip().lower()
 
@@ -183,67 +252,197 @@ def compare_quranic_arabic(recited: str, reference: str) -> float:
 
     if not reference_words:
         return 0.0
+    
+    if not recited_words:
+        return 0.0
 
-    matched_words = 0
+    total_similarity = 0.0
     total_words = len(reference_words)
 
     for i in range(total_words):
+        word_similarity = 0.0
+        
         if i < len(recited_words):
             if is_single_arabic_letter(reference_words[i]):
-                letter_similarity = compare_single_letter(recited_words[i], reference_words[i])
-                if letter_similarity > 0.7:
-                    matched_words += 1
+                word_similarity = compare_single_letter(recited_words[i], reference_words[i])
             else:
-                word_similarity = compare_words(recited_words[i], reference_words[i])
-                if word_similarity > 0.8:
-                    matched_words += 1
+                # Try exact match first
+                if recited_words[i] == reference_words[i]:
+                    word_similarity = 1.0
+                else:
+                    # Try fuzzy matching with lower threshold
+                    base_similarity = compare_words(recited_words[i], reference_words[i])
+                    
+                    # Also check if the recited word contains the reference word or vice versa
+                    if reference_words[i] in recited_words[i] or recited_words[i] in reference_words[i]:
+                        containment_bonus = 0.3
+                    else:
+                        containment_bonus = 0.0
+                    
+                    word_similarity = min(1.0, base_similarity + containment_bonus)
+        
+        # If word similarity is below threshold, try to find the word elsewhere in the recited text
+        if word_similarity < 0.6:
+            for j, recited_word in enumerate(recited_words):
+                if j != i:  # Don't check the same position again
+                    alt_similarity = compare_words(recited_word, reference_words[i])
+                    if alt_similarity > word_similarity:
+                        word_similarity = alt_similarity * 0.8  # Penalty for wrong position
+        
+        total_similarity += word_similarity
 
-    return matched_words / total_words
+    # Calculate average similarity
+    average_similarity = total_similarity / total_words
+    
+    # Apply length penalty if recited text is significantly different in length
+    length_ratio = len(recited_words) / len(reference_words)
+    if length_ratio < 0.8 or length_ratio > 1.2:
+        length_penalty = 0.9
+    else:
+        length_penalty = 1.0
+    
+    return average_similarity * length_penalty
 
 
 # --- FastAPI Endpoints ---
 
-@app.post("/grade_recitation/")
+@app.post("/grade_recitation/", response_model=GradingResponse)
 async def grade_recitation(
-        audio_file: UploadFile = File(...),
-        compared_letters: str = ""  # This will be the reference Quranic text
+        request: Request,
+        audio_file: UploadFile = File(..., description="Audio file containing Quranic recitation"),
+        compared_letters: str = Form(..., description="Reference Quranic text to compare against")
 ):
-    if not compared_letters:
-        raise HTTPException(status_code=400, detail="Reference Quranic text (compared_letters) is required.")
+    """
+    Grade a Quranic recitation by comparing the transcribed audio with reference text.
+    
+    - **audio_file**: Audio file (WAV, MP3, M4A, etc.) containing the recitation
+    - **compared_letters**: The reference Quranic text to compare against
+    
+    Returns detailed grading information including similarity score and pass/fail status.
+    """
+    start_time = time.time()
+    client_ip = request.client.host if request.client else "unknown"
+    
+    logger.info(f"Grading request from {client_ip} - Reference: '{compared_letters[:50]}...'")
+    
+    # Validation
+    if not compared_letters or not compared_letters.strip():
+        logger.warning(f"Empty reference text from {client_ip}")
+        raise HTTPException(
+            status_code=400, 
+            detail="Reference Quranic text (compared_letters) is required and cannot be empty."
+        )
 
-    if not audio_file.content_type.startswith("audio/"):
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload an audio file.")
+    if not audio_file.filename:
+        raise HTTPException(status_code=400, detail="No file provided.")
+    
+    # Check file size
+    if audio_file.size and audio_file.size > config.MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"File too large. Maximum size allowed: {config.MAX_FILE_SIZE // (1024*1024)}MB"
+        )
 
+    # Validate file type
+    if not audio_file.content_type or not audio_file.content_type.startswith("audio/"):
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid file type. Please upload an audio file (WAV, MP3, M4A, etc.)."
+        )
+
+    audio_stream = None
     try:
+        # Ensure model is loaded
+        global model
+        if model is None:
+            raise HTTPException(status_code=500, detail="Speech recognition model not available")
+        
         # Read audio file into a BytesIO object for Whisper
         audio_bytes = await audio_file.read()
+        
+        if len(audio_bytes) == 0:
+            raise HTTPException(status_code=400, detail="Empty audio file")
+        
         audio_stream = io.BytesIO(audio_bytes)
 
         # Transcribe audio using Whisper
-        # You might need to specify the language if not auto-detected well
-        segments, info = model.transcribe(audio_stream, language="ar", beam_size=5)  # 'ar' for Arabic
-
+        logger.info(f"Transcribing audio from {client_ip} - File: {audio_file.filename}")
+        segments, info = model.transcribe(audio_stream, language="ar", beam_size=5)
+        
         spoken_text = " ".join([segment.text for segment in segments])
+        logger.info(f"Transcription result: '{spoken_text}'")
 
         # Perform grading
         similarity = compare_quranic_arabic(spoken_text, compared_letters)
         grade = round(similarity * 100, 2)
-        is_passed = grade >= 70
+        is_passed = grade >= config.PASS_THRESHOLD
+        
+        processing_time = int((time.time() - start_time) * 1000)
+        
+        logger.info(f"Grading complete - Grade: {grade}%, Passed: {is_passed}, Time: {processing_time}ms")
 
-        return JSONResponse(content={
-            "transcribed_text": spoken_text,
-            "grade": grade,
-            "is_passed": is_passed,
-            "reference_text": compared_letters,
-            "similarity_score": similarity
-        })
+        return GradingResponse(
+            transcribed_text=spoken_text,
+            grade=grade,
+            is_passed=is_passed,
+            reference_text=compared_letters,
+            similarity_score=similarity,
+            processing_time_ms=processing_time
+        )
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error processing request: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+        logger.error(f"Error processing request from {client_ip}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail="An error occurred while processing your request. Please try again."
+        )
+    finally:
+        # Clean up audio stream if it was created
+        try:
+            if audio_stream is not None:
+                audio_stream.close()
+        except:
+            pass
 
 
 @app.get("/")
 async def root():
-    return {"message": "Quran Recitation Grader API is running!"}
+    """Health check endpoint"""
+    return {
+        "message": "Quran Recitation Grader API is running!",
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "version": "1.0.0"
+    }
 
-# You can add more endpoints if needed, e.g., for model status, health checks etc.
+@app.get("/health")
+async def health_check():
+    """Detailed health check for monitoring"""
+    return {
+        "status": "healthy",
+        "model_status": "loaded" if model is not None else "not_loaded",
+        "timestamp": time.time(),
+        "configuration": {
+            "model_size": config.MODEL_SIZE,
+            "device": config.DEVICE,
+            "pass_threshold": config.PASS_THRESHOLD
+        }
+    }
+
+
+# --- Run the server ---
+if __name__ == "__main__":
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "10000"))  # Render's default port
+    
+    logger.info(f"Starting Quran Grader API on {host}:{port}")
+    uvicorn.run(
+        app, 
+        host=host, 
+        port=port,
+        log_level="info",
+        access_log=True
+    )
+
