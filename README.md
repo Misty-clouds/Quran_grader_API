@@ -36,34 +36,41 @@ A production-ready FastAPI service for transcribing and grading Quranic recitati
 
 ```
 quran_grader_api/
-├── main.py                    # Main FastAPI application
+├── main.py                    # Main FastAPI application (zero-config!)
 ├── requirements.txt           # Python dependencies
 ├── runtime.txt               # Python version for Render
-├── .env.example              # Environment configuration template
 ├── .gitignore                # Git ignore rules
 ├── README.md                 # This file
 ├── RENDER_DEPLOYMENT.md      # Detailed deployment guide
 ├── flutter_client.dart      # Flutter/Dart client example
+├── flutter_client_500_students.dart  # Optimized for large classes
 ├── test_production.py        # Local API testing
 └── test_render.py           # Render deployment testing
 ```
 
 ## Quick Start
 
-### Using Docker (Recommended for Production)
+### 🚀 Zero-Config Render Deployment
+
+Your API is pre-configured for instant deployment:
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd quran_grader_api
+# 1. Push to GitHub
+git add .
+git commit -m "Deploy Quran Grader API"
+git push origin main
 
-# Build and run with Docker Compose
-docker-compose up --build
-
-# API will be available at http://localhost:8000
+# 2. Go to render.com
+# 3. Connect GitHub repo
+# 4. Click "Create Web Service"
+# 5. Done! ✨
 ```
 
-### Manual Installation
+**No environment variables needed!** Everything works out-of-the-box.
+
+### Using Docker (Alternative)
+
+### Manual Installation (Local Development)
 
 1. **Clone the repository**
 ```bash
@@ -82,31 +89,34 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. **Configure environment (optional)**
-```bash
-cp .env.example .env
-# Edit .env file with your settings
-```
-
-5. **Run the server**
+4. **Run the server**
 ```bash
 python main.py
 ```
 
 ## Configuration
 
-Environment variables can be set in `.env` file or passed directly:
+Your API comes with production-ready defaults! **No configuration needed.**
 
-| Variable | Default | Description |
+### Default Settings (Optimized for Render):
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| **Model Size** | `small` | Fast startup, works on free tier |
+| **File Size Limit** | 30MB | Balanced quality/performance |
+| **Passing Grade** | 70% | Standard educational threshold |
+| **CORS** | All origins | Easy Flutter integration |
+
+### Optional Customization:
+
+Want to customize? Set these environment variables in Render dashboard:
+
+| Variable | Example | When to Use |
 |----------|---------|-------------|
-| `WHISPER_MODEL_SIZE` | `medium` | Whisper model size (tiny, base, small, medium, large) |
-| `WHISPER_DEVICE` | `cpu` | Device to run on (cpu, cuda) |
-| `WHISPER_COMPUTE_TYPE` | `int8` | Compute precision (int8, float16, float32) |
-| `MAX_FILE_SIZE` | `50` | Maximum audio file size in MB |
-| `PASS_THRESHOLD` | `70.0` | Minimum grade percentage to pass |
-| `ALLOWED_ORIGINS` | `*` | CORS allowed origins (comma-separated) |
-| `HOST` | `0.0.0.0` | Server host |
-| `PORT` | `8000` | Server port |
+| `WHISPER_MODEL_SIZE` | `medium` | Better accuracy (needs paid plan) |
+| `MAX_FILE_SIZE` | `50` | Higher quality audio |
+| `ALLOWED_ORIGINS` | `https://yourapp.com` | Production security |
+| `PASS_THRESHOLD` | `75.0` | Stricter grading |
 
 ## API Endpoints
 
@@ -260,6 +270,11 @@ The API includes:
 
 ## Production Checklist
 
+✅ **Zero Configuration**
+- Pre-configured with optimal defaults
+- No environment variables required
+- Push-and-go deployment
+
 ✅ **Security**
 - CORS properly configured
 - Input validation and sanitization
@@ -280,6 +295,6 @@ The API includes:
 
 ✅ **Documentation**
 - OpenAPI/Swagger docs at `/docs`
-- Flutter client example
+- Flutter client examples
 - Production deployment guide
-- Configuration reference
+- Zero-config setup

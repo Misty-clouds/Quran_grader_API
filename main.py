@@ -28,15 +28,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
+# Configuration - Optimized for Render with sensible defaults
 class Config:
-    MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")  # Changed from medium to small for Render
+    # Use small model by default for faster startup and lower memory usage
+    # Can be overridden with environment variable if needed
+    MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
+    
+    # CPU optimized settings for Render
     COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
     DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
-    MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "25")) * 1024 * 1024  # Reduced to 25MB for Render
+    
+    # Balanced file size limit for quality vs performance
+    MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "30")) * 1024 * 1024  # 30MB default
+    
+    # Standard passing threshold
     PASS_THRESHOLD = float(os.getenv("PASS_THRESHOLD", "70.0"))
+    
+    # Allow all origins by default for easy Flutter integration
     ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-    PORT = int(os.getenv("PORT", "10000"))  # Render's default port
+    
+    # Render's standard port
+    PORT = int(os.getenv("PORT", "10000"))
 
 config = Config()
 
