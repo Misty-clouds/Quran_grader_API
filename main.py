@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 class Config:
     # Use small model by default for faster startup and lower memory usage
     # Can be overridden with environment variable if needed
-    MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
+    MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "medium")
     
     # CPU optimized settings for Render
     COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
