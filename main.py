@@ -10,6 +10,7 @@ import re
 import logging
 import os
 import time
+import base64
 from typing import List, Dict, Optional
 from contextlib import asynccontextmanager
 
@@ -60,6 +61,11 @@ class GradingResponse(BaseModel):
     reference_text: str
     similarity_score: float = Field(..., ge=0, le=1)
     processing_time_ms: int
+
+class Base64AudioRequest(BaseModel):
+    audio_base64: str = Field(..., description="Base64 encoded audio data")
+    compared_letters: str = Field(..., description="Reference Quranic text to compare against")
+    audio_format: Optional[str] = Field("wav", description="Audio format (wav, mp3, m4a, etc.)")
 
 class ErrorResponse(BaseModel):
     error: str
@@ -406,6 +412,115 @@ async def grade_recitation(
         raise
     except Exception as e:
         logger.error(f"Error processing request from {client_ip}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, 
+            detail="An error occurred while processing your request. Please try again."
+        )
+    finally:
+        # Clean up audio stream if it was created
+        try:
+            if audio_stream is not None:
+                audio_stream.close()
+        except:
+            pass
+
+
+@app.post("/grade_recitation_base64/", response_model=GradingResponse)
+async def grade_recitation_base64(
+        request: Request,
+        audio_request: Base64AudioRequest
+):
+    """
+    Grade a Quranic recitation using base64 encoded audio data.
+    
+    This endpoint is designed for FlutterFlow and other platforms that work better with JSON requests.
+    
+    - **audio_base64**: Base64 encoded audio data
+    - **compared_letters**: The reference Quranic text to compare against
+    - **audio_format**: Optional audio format specification (wav, mp3, m4a, etc.)
+    
+    Returns detailed grading information including similarity score and pass/fail status.
+    """
+    start_time = time.time()
+    client_ip = request.client.host if request.client else "unknown"
+    
+    logger.info(f"Base64 grading request from {client_ip} - Reference: '{audio_request.compared_letters[:50]}...'")
+    
+    # Validation
+    if not audio_request.compared_letters or not audio_request.compared_letters.strip():
+        logger.warning(f"Empty reference text from {client_ip}")
+        raise HTTPException(
+            status_code=400, 
+            detail="Reference Quranic text (compared_letters) is required and cannot be empty."
+        )
+
+    if not audio_request.audio_base64 or not audio_request.audio_base64.strip():
+        raise HTTPException(status_code=400, detail="Base64 audio data is required.")
+
+    audio_stream = None
+    try:
+        # Ensure model is loaded
+        global model
+        if model is None:
+            raise HTTPException(status_code=500, detail="Speech recognition model not available")
+        
+        # Decode base64 audio data
+        try:
+            # Remove data URL prefix if present (e.g., "data:audio/wav;base64,")
+            base64_data = audio_request.audio_base64
+            if ',' in base64_data:
+                base64_data = base64_data.split(',', 1)[1]
+            
+            audio_bytes = base64.b64decode(base64_data)
+        except Exception as e:
+            logger.error(f"Error decoding base64 audio from {client_ip}: {str(e)}")
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid base64 audio data. Please ensure the audio is properly encoded."
+            )
+        
+        if len(audio_bytes) == 0:
+            raise HTTPException(status_code=400, detail="Empty audio data after decoding")
+        
+        # Check decoded file size
+        if len(audio_bytes) > config.MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Audio data too large. Maximum size allowed: {config.MAX_FILE_SIZE // (1024*1024)}MB"
+            )
+        
+        # Create BytesIO object for Whisper
+        audio_stream = io.BytesIO(audio_bytes)
+
+        # Transcribe audio using Whisper
+        logger.info(f"Transcribing base64 audio from {client_ip} - Format: {audio_request.audio_format}")
+        segments, info = model.transcribe(audio_stream, language="ar", beam_size=5)
+        
+        spoken_text = " ".join([segment.text for segment in segments])
+        logger.info(f"Transcription result: '{spoken_text}'")
+
+        # Perform grading
+        similarity = compare_quranic_arabic(spoken_text, audio_request.compared_letters)
+        grade = round(similarity * 100, 2)
+        is_passed = grade >= config.PASS_THRESHOLD
+        
+        processing_time = int((time.time() - start_time) * 1000)
+        
+        logger.info(f"Base64 grading complete - Grade: {grade}%, Passed: {is_passed}, Time: {processing_time}ms")
+
+        return GradingResponse(
+            transcribed_text=spoken_text,
+            grade=grade,
+            is_passed=is_passed,
+            reference_text=audio_request.compared_letters,
+            similarity_score=similarity,
+            processing_time_ms=processing_time
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing base64 request from {client_ip}: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500, 
             detail="An error occurred while processing your request. Please try again."
